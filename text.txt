@@ -1,0 +1,13 @@
+--- Enter Sensor Data ---
+Roll (degrees): -6.63
+Pitch (degrees): -55.53
+Yaw (degrees, 0 = North, 90 = East): -119.00
+
+--- Enter GPS Location ---
+Latitude (degrees, + for North, - for South): 13.351557 
+Longitude (degrees, + for East, - for West): 74.793264
+
+Use current date/time? (y/n): y
+
+--- Load Camera Image ---
+Enter path to image file: test.jpg
