@@ -9,37 +9,18 @@ from flask import Flask, request, jsonify
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+from skyfield.api import load, wgs84
+from skyfield.data import hipparcos
+from skyfield.api import utc
+import pandas as pd
 
 app = Flask(__name__)
 
 class CelestialBodyDetector:
     def __init__(self):
-        # Hard-coded database of celestial bodies
-        # Format: name, right ascension (hours), declination (degrees), apparent magnitude
-        self.celestial_bodies = [
-            ("Sun", 0.0, 0.0, -26.7),  # RA and Dec will be calculated based on date
-            ("Moon", 0.0, 0.0, -12.6),  # RA and Dec will be calculated based on date
-            ("Mercury", 2.5, 15.2, -0.2),
-            ("Venus", 4.3, 22.1, -4.1),
-            ("Mars", 18.2, -24.3, 1.8),
-            ("Jupiter", 12.5, -3.2, -2.7),
-            ("Saturn", 20.7, -18.9, 0.5),
-            ("Sirius", 6.75, -16.72, -1.46),
-            ("Canopus", 6.4, -52.7, -0.72),
-            ("Alpha Centauri", 14.66, -60.83, -0.27),
-            ("Arcturus", 14.27, 19.18, -0.05),
-            ("Vega", 18.62, 38.78, 0.03),
-            ("Capella", 5.28, 46.0, 0.08),
-            ("Rigel", 5.24, -8.2, 0.13),
-            ("Procyon", 7.65, 5.21, 0.34),
-            ("Betelgeuse", 5.92, 7.41, 0.5),
-            ("Achernar", 1.63, -57.24, 0.46),
-            ("Hadar", 14.06, -60.37, 0.61),
-            ("Altair", 19.85, 8.87, 0.76),
-            ("Acrux", 12.44, -63.1, 0.77)
-        ]
-        
-        # Field of view for typical smartphone camera (in degrees)
+        self.latitude = 0
+        self.longitude = 0
+        self.celestial_bodies = []  # Will be populated later
         self.fov_horizontal = 66
         self.fov_vertical = 45
     
@@ -93,44 +74,172 @@ class CelestialBodyDetector:
         return rotated_vec
     
     def view_direction_to_celestial(self, direction_vector, latitude, longitude, timestamp):
-        """Convert a viewing direction to celestial coordinates (RA and Dec)"""
-        # Simple approximation for demo purposes
-        # A full implementation would need accurate astronomical calculations
+        """
+        Convert a viewing direction to celestial coordinates (RA and Dec)
         
-        # Calculate Local Sidereal Time (LST)
-        # This is a simplified approximation
-        utc_hours = timestamp.hour + timestamp.minute / 60.0
-        days_since_j2000 = (timestamp - datetime(2000, 1, 1)).total_seconds() / 86400.0
-        lst_hours = (100.46 + 0.985647 * days_since_j2000 + longitude + 15 * utc_hours) % 24
+        Parameters:
+        -----------
+        direction_vector : list or array-like
+            A normalized 3D vector representing the viewing direction in local coordinates
+            [x, y, z] where x points East, y points North, and z points up
+        latitude : float
+            Observer's latitude in degrees (positive for North, negative for South)
+        longitude : float
+            Observer's longitude in degrees (positive for East, negative for West)
+        timestamp : datetime
+            Time of observation (UTC)
+        
+        Returns:
+        --------
+        tuple
+            (right_ascension, declination) where:
+            - right_ascension is in hours (0 to 24)
+            - declination is in degrees (-90 to +90)
+        """
+        import math
+        from datetime import datetime, timedelta
+        from skyfield.api import utc
+        
+        # Normalize the direction vector to ensure it's a unit vector
+        magnitude = math.sqrt(sum(x*x for x in direction_vector))
+        if abs(magnitude - 1.0) > 1e-6:  # If not already normalized
+            direction_vector = [x/magnitude for x in direction_vector]
+        
+        # Extract the direction vector components
+        # Note: assuming x=East, y=North, z=Up in the local horizontal frame
+        x, y, z = direction_vector
         
         # Convert direction vector to horizontal coordinates (azimuth and altitude)
-        azimuth = math.degrees(math.atan2(direction_vector[1], direction_vector[0]))
-        altitude = math.degrees(math.asin(direction_vector[2]))
-        
-        # Convert azimuth to standard form (0 to 360, measured from North)
+        # Azimuth: angle measured eastward from north (standard astronomical definition)
+        azimuth = math.degrees(math.atan2(x, y))
+        # Ensure azimuth is in the range [0, 360)
         azimuth = (azimuth + 360) % 360
         
-        # Convert horizontal coordinates to equatorial coordinates (RA and Dec)
+        # Altitude: angle above the horizon
+        altitude = math.degrees(math.asin(z))
+        
+        # Calculate Greenwich Mean Sidereal Time (GMST)
+        # Use more accurate formula for GMST calculation
+        # First, calculate J2000 date
+        # Make sure both datetimes have timezone info for consistent subtraction
+        j2000_date = datetime(2000, 1, 1, 12, 0, 0, tzinfo=utc)  # J2000 epoch with timezone
+        dt_j2000 = timestamp - j2000_date
+        days_since_j2000 = dt_j2000.total_seconds() / 86400.0
+        
+        # Calculate GMST in hours
+        # This formula gives GMST at 0h UTC
+        gmst_at_0h = (18.697374558 + 24.06570982441908 * days_since_j2000) % 24
+        
+        # Correct for the current UTC time
+        utc_hours = timestamp.hour + timestamp.minute / 60.0 + timestamp.second / 3600.0
+        gmst = (gmst_at_0h + utc_hours * 1.002737909) % 24
+        
+        # Calculate Local Sidereal Time (LST)
+        # Convert longitude to hours (15 degrees = 1 hour)
+        lst = (gmst + longitude/15.0) % 24
+        
+        # Convert horizontal coordinates to equatorial coordinates
         lat_rad = math.radians(latitude)
         alt_rad = math.radians(altitude)
         az_rad = math.radians(azimuth)
         
-        # Calculate hour angle
+        # Calculate declination
         sin_dec = math.sin(alt_rad) * math.sin(lat_rad) + math.cos(alt_rad) * math.cos(lat_rad) * math.cos(az_rad)
-        dec = math.degrees(math.asin(sin_dec))
+        dec_rad = math.asin(sin_dec)
+        dec = math.degrees(dec_rad)
         
-        cos_h = (math.sin(alt_rad) - math.sin(lat_rad) * math.sin(math.radians(dec))) / (math.cos(lat_rad) * math.cos(math.radians(dec)))
-        cos_h = max(min(cos_h, 1.0), -1.0)  # Clamp to [-1, 1]
-        hour_angle = math.degrees(math.acos(cos_h))
+        # Calculate hour angle
+        cos_ha = (math.sin(alt_rad) - math.sin(lat_rad) * sin_dec) / (math.cos(lat_rad) * math.cos(dec_rad))
+        
+        # Handle edge cases where floating-point errors might lead to values outside [-1, 1]
+        cos_ha = max(min(cos_ha, 1.0), -1.0)
+        ha_rad = math.acos(cos_ha)
         
         # Adjust sign of hour angle based on azimuth
-        if azimuth > 180:
-            hour_angle = -hour_angle
+        if azimuth > 180 and azimuth < 360:
+            ha_rad = -ha_rad
+        
+        # Convert hour angle from radians to hours
+        ha = math.degrees(ha_rad) / 15.0
         
         # Calculate Right Ascension from LST and hour angle
-        ra_hours = (lst_hours - hour_angle / 15) % 24
+        ra = (lst - ha) % 24
+            
+        return ra, dec
+
+    def update_celestial_bodies(self, timestamp):
+        # Load the necessary data files
+        planets = load('de421.bsp')  # Ephemeris file for solar system bodies
+        ts = load.timescale()
         
-        return ra_hours, dec
+        # Convert timestamp to Skyfield time
+        t = ts.from_datetime(timestamp)
+        
+        # Set up observer location
+        earth = planets['earth']
+        observer = earth + wgs84.latlon(self.latitude, self.longitude)
+        
+        # Calculate positions for solar system bodies
+        sun = planets['sun']
+        moon = planets['moon']
+        mercury = planets['mercury barycenter']
+        venus = planets['venus barycenter']
+        mars = planets['mars barycenter']
+        jupiter = planets['jupiter barycenter']
+        saturn = planets['saturn barycenter']
+        
+        # Get positions relative to observer
+        sun_astrometric = observer.at(t).observe(sun).apparent()
+        moon_astrometric = observer.at(t).observe(moon).apparent()
+        mercury_astrometric = observer.at(t).observe(mercury).apparent()
+        venus_astrometric = observer.at(t).observe(venus).apparent()
+        mars_astrometric = observer.at(t).observe(mars).apparent()
+        jupiter_astrometric = observer.at(t).observe(jupiter).apparent()
+        saturn_astrometric = observer.at(t).observe(saturn).apparent()
+        
+        # Convert to RA/Dec
+        sun_ra, sun_dec, _ = sun_astrometric.radec()
+        moon_ra, moon_dec, _ = moon_astrometric.radec()
+        mercury_ra, mercury_dec, _ = mercury_astrometric.radec()
+        venus_ra, venus_dec, _ = venus_astrometric.radec()
+        mars_ra, mars_dec, _ = mars_astrometric.radec()
+        jupiter_ra, jupiter_dec, _ = jupiter_astrometric.radec()
+        saturn_ra, saturn_dec, _ = saturn_astrometric.radec()
+        
+        # Load bright star data
+        star_data = []
+        try:
+            with load.open(hipparcos.URL) as f:
+                df = hipparcos.load_dataframe(f)
+                
+                # Filter for bright stars - using actual column names from debug output
+                bright_stars = df[df['magnitude'] <= 1.5]  # Filter for bright stars
+                
+                # Use the columns we know exist from debugging output
+                for _, star in bright_stars.iterrows():
+                    # Use index as name since there's no name/proper column
+                    name = f"Star {_}"
+                    
+                    # Use confirmed column names from debug output
+                    ra_hours = star['ra_hours']
+                    dec_deg = star['dec_degrees']
+                    mag = star['magnitude']
+                    
+                    star_data.append((name, ra_hours, dec_deg, mag))
+        except Exception as e:
+            print(f"Error loading star data: {e}")
+            # Continue with just planets if star data fails
+        
+        # Update the celestial bodies with calculated positions
+        self.celestial_bodies = [
+            ("Sun", sun_ra.hours, sun_dec.degrees, -26.7),
+            ("Moon", moon_ra.hours, moon_dec.degrees, -12.6),
+            ("Mercury", mercury_ra.hours, mercury_dec.degrees, -0.2),
+            ("Venus", venus_ra.hours, venus_dec.degrees, -4.1),
+            ("Mars", mars_ra.hours, mars_dec.degrees, 1.8),
+            ("Jupiter", jupiter_ra.hours, jupiter_dec.degrees, -2.7),
+            ("Saturn", saturn_ra.hours, saturn_dec.degrees, 0.5)
+        ] + star_data
     
     def is_celestial_body_visible(self, ra_hours, dec, tolerance=3.0):
         """Check if any celestial body is at the given RA and Dec"""
@@ -162,6 +271,10 @@ class CelestialBodyDetector:
     
     def process_image(self, image, roll, pitch, yaw, latitude, longitude, timestamp):
         """Process the image and identify celestial bodies"""
+        self.latitude = latitude
+        self.longitude = longitude
+        self.update_celestial_bodies(timestamp)
+            
         height, width = image.shape[:2]
         result_image = image.copy()
         
@@ -269,8 +382,11 @@ def detect_celestial_bodies():
         timestamp_data = data.get('timestamp', None)
         if timestamp_data:
             timestamp = datetime.fromisoformat(timestamp_data)
+            # Add timezone information if missing
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=utc)
         else:
-            timestamp = datetime.now()
+            timestamp = datetime.now(tz=utc)  # Create with timezone
         
         # Extract and decode the image
         image_b64 = data.get('image', '')
@@ -313,8 +429,13 @@ def detect_celestial_bodies():
         })
     
     except Exception as e:
+        import traceback
+        error_traceback = traceback.format_exc()
+        print(f"Error processing request: {e}")
+        print(error_traceback)
         return jsonify({
             'error': str(e),
+            'traceback': error_traceback,
             'status': 'error'
         }), 500
 
